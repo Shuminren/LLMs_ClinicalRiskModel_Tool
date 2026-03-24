@@ -218,11 +218,11 @@ def disagreement_resolution(grok_key, claude_key, agreement_filepath):
             
             # Call both Grok and Claude simultaneously for cross-validation
             print("  Calling Grok to verify Claude's response...")
-            grok_verification = grok_function(content, prompt_grok, grok_key, "grok-3")
+            grok_verification = grok_function(content, prompt_grok, grok_key, "grok-4.1")
             grok_verification = str(grok_verification) if grok_verification else "No response from Grok"
             
             print("  Calling Claude to verify Grok's response...")
-            claude_verification = claude_function(content, prompt_claude, claude_key, "claude-sonnet-4-20250514")
+            claude_verification = claude_function(content, prompt_claude, claude_key, "claude-opus-4-5-20251101")
             claude_verification = str(claude_verification) if claude_verification else "No response from Claude"
             
             # Claude API has TPM limits, add delay
@@ -277,7 +277,7 @@ def claude_function(content, prompt, api_key, model_name):
             full_prompt = f"{prompt}\n\nText to verify:\n{content}"
             
             message = client.messages.create(
-                model=model_name if model_name.startswith("claude") else "claude-sonnet-4-20250514",
+                    model=model_name if model_name.startswith("claude") else "claude-opus-4-5-20251101",
                 max_tokens=2048,
                 temperature=0,
                 messages=[{
@@ -303,7 +303,7 @@ def grok_function(content, prompt, api_key, model_name):
         content: Text content to verify
         prompt: Verification prompt
         api_key: Grok API key
-        model_name: Model name (e.g., "grok-3")
+        model_name: Model name (e.g., "grok-4.1")
     
     Returns:
         str: API response content
@@ -320,7 +320,7 @@ def grok_function(content, prompt, api_key, model_name):
                     base_url="https://api.x.ai/v1"
                 )
                 response = client.chat.completions.create(
-                    model=model_name if model_name else "grok-3",
+                    model=model_name if model_name else "grok-4.1",
                     messages=messages,
                     temperature=0,
                     max_tokens=2048

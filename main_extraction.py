@@ -9,36 +9,43 @@ Fetches article information from PubMed and PMC, and uses LLM to extract structu
 # 1. Model Configuration
 # =====================================
 API_KEY = "your-openai-api-key-here"
-MODEL = "grok-3"
+MODEL = "claude-opus-4-5-20251101"
+API_MAX_INPUT_TOKENS = 180000
 
 # =====================================
 # 2. Model Configuration and Utility Functions
 # =====================================
-import openai
 from rich.console import Console
 import time
-from openai import OpenAIError  
+import math
 
 console = Console()
 
 def chat_completion(messages, max_retries=3, backoff_factor=2):
     """Call LLM API for conversation"""
+    try:
+        import anthropic
+    except ImportError:
+        console.print("[bold red]anthropic package is required. Install with: pip install anthropic[/]")
+        return None
+
     for attempt in range(max_retries):
         try:
-            client = openai.OpenAI(
-                api_key=API_KEY,
-                base_url="https://api.x.ai/v1"
-            )
-            response = client.chat.completions.create(
+            client = anthropic.Anthropic(api_key=API_KEY)
+            user_content = "\n\n".join(
+                msg.get("content", "") for msg in messages if msg.get("role") == "user"
+            ).strip()
+            response = client.messages.create(
                 model=MODEL,
-                messages=messages,
-                temperature=0,
-                max_tokens=2048
+                max_tokens=6000,
+                temperature=0.5,
+                messages=[{"role": "user", "content": user_content}]
             )
-            return response.choices[0].message.content
-        except OpenAIError as e:  
-            if e.status_code == 429:  
-                sleep_time = backoff_factor ** attempt  
+            return response.content[0].text if response.content else None
+        except Exception as e:
+            error_text = str(e).lower()
+            if "rate limit" in error_text or "429" in error_text:
+                sleep_time = backoff_factor ** attempt
                 console.print(f"[bold yellow]Rate limit hit (429). Retrying after {sleep_time} seconds... (Attempt {attempt+1}/{max_retries})[/]")
                 time.sleep(sleep_time)
             else:
@@ -267,21 +274,40 @@ def clean_text_v2(text: str) -> str:
     
     return text.strip()
 
-def chunk_text_v2(text: str, chunk_size_words: int = 4000, overlap_words: int = 1000) -> List[str]:
-    """Chunk text with overlap"""
+def chunk_text_v2(
+    text: str,
+    max_input_tokens: Optional[int] = None,
+    chunk_size_words: int = 4000,
+    overlap_words: int = 1000,
+    token_per_word: float = 1.3
+) -> List[str]:
+    """Chunk text by max input tokens (falls back to fixed word chunks)."""
     words = text.split()
+    if not words:
+        return []
+
+    if max_input_tokens and max_input_tokens > 0:
+        estimated_total_tokens = math.ceil(len(words) * token_per_word)
+        if estimated_total_tokens <= max_input_tokens:
+            return [text]
+        chunk_size_words = max(1, int(max_input_tokens / token_per_word))
+        # Ensure we can advance; keep 1000-word overlap when text exceeds token limit.
+        if chunk_size_words <= overlap_words:
+            overlap_words = max(0, chunk_size_words - 1)
+
     if len(words) <= chunk_size_words:
         return [text]
     
     chunks = []
     start = 0
+    step = max(1, chunk_size_words - overlap_words)
     while start < len(words):
         end = min(start + chunk_size_words, len(words))
         chunk = ' '.join(words[start:end])
         chunks.append(chunk)
         if end == len(words):
             break
-        start += chunk_size_words - overlap_words
+        start += step
     return chunks
 
 # PMC scraper class
@@ -717,20 +743,50 @@ literature_fields = [
     "Full Text"
 ]
 
-def process_input(input_text, prompts):
+def process_input(input_text, prompts, max_input_tokens: Optional[int] = None):
     """Process input text and get LLM responses using prompts"""
     responses = []
+    text_chunks = chunk_text_v2(
+        input_text,
+        max_input_tokens=max_input_tokens,
+        overlap_words=1000
+    )
+    if not text_chunks:
+        text_chunks = [input_text]
+
+    if len(text_chunks) > 1:
+        console.print(f"[yellow]Input text exceeds token limit estimate, split into {len(text_chunks)} chunks (1000-word overlap).[/]")
+
     for i, prompt in enumerate(prompts, 1):
-        messages = [{"role": "user", "content": prompt.replace("[Extracted text]", input_text)}]
         console.print(f"[italic yellow]Processing Prompt {i}...[/]")
-        response = chat_completion(messages)
-        if response:
-            responses.append(response)
-            console.print(f"\n[bold magenta]Response {i}:[/]")
-            console.print(response)
-            console.print("\n" + "-"*50 + "\n")
+
+        if "[Extracted text]" in prompt and len(text_chunks) > 1:
+            chunk_responses = []
+            for chunk_idx, chunk_text in enumerate(text_chunks, 1):
+                console.print(f"[dim]  Prompt {i}: chunk {chunk_idx}/{len(text_chunks)}[/]")
+                messages = [{"role": "user", "content": prompt.replace("[Extracted text]", chunk_text)}]
+                chunk_response = chat_completion(messages)
+                if chunk_response:
+                    chunk_responses.append(f"[Chunk {chunk_idx}/{len(text_chunks)}]\n{chunk_response}")
+
+            if chunk_responses:
+                combined_response = "\n\n".join(chunk_responses)
+                responses.append(combined_response)
+                console.print(f"\n[bold magenta]Response {i}:[/]")
+                console.print(combined_response)
+                console.print("\n" + "-"*50 + "\n")
+            else:
+                console.print(f"[bold red]Prompt {i} processing failed[/]")
         else:
-            console.print(f"[bold red]Prompt {i} processing failed[/]")
+            messages = [{"role": "user", "content": prompt.replace("[Extracted text]", input_text)}]
+            response = chat_completion(messages)
+            if response:
+                responses.append(response)
+                console.print(f"\n[bold magenta]Response {i}:[/]")
+                console.print(response)
+                console.print("\n" + "-"*50 + "\n")
+            else:
+                console.print(f"[bold red]Prompt {i} processing failed[/]")
     return responses
 
 def extract_sample_data(response_sample, pmid):
@@ -846,8 +902,7 @@ def main():
                 # If full text is available, perform information extraction
                 if full_text:
                     prompts = get_prompts()
-                    prompt1_with_fulltext = prompts[0].replace("[Extracted text]", full_text)
-                    responses = process_input(prompt1_with_fulltext, prompts)
+                    responses = process_input(full_text, prompts, max_input_tokens=API_MAX_INPUT_TOKENS)
                     
                     if len(responses) >= 4:
                         response_sample = responses[2]  # Prompt 3
