@@ -609,76 +609,111 @@ def fetch_pmc_full_text_v2(pmcid: str, driver=None) -> Dict:
 # 5. Prompt Definitions
 # =====================================
 def get_prompts():
-    """Define prompts for information extraction"""
+    """Define the four-stage prompt workflow for schema-aligned JSON extraction."""
     prompt1 = """
-You are a medical research assistant specializing in the study of clinical risk prediction models. You assist users in collecting information and providing answers by identifying and analyzing medical information, statistical data, and prediction models within text. 
+You are a medical research assistant specializing in clinical risk prediction model literature.
+
+General extraction rules:
+1. Extract information only from the provided article text. Do not use outside knowledge, memory, or assumptions.
+2. If a field is not explicitly reported, answer N/A. If the field cannot be determined with confidence, answer N/A rather than guessing.
+3. Only perform direct arithmetic calculations when all required source values are explicitly reported in the text. Do not infer, estimate, impute, or back-calculate missing values.
+4. Distinguish development/internal validation from external validation. External validation requires an independent cohort, institution, registry, geographic population, or clearly independent time period. Random train-test splits, cross-validation, bootstrap validation, and internal test sets are not external validation.
+5. Study type should be extracted as reported by the authors and should not be forced into a prospective/retrospective binary.
+
 [Extracted text]
-Please analyze the above text and extract detailed information related to the study design and its key parameters. Specifically, extract the following elements.
-1. Study Type: Indicate whether the data used in the research comes from a prospective study (cohort study) or a retrospective study (case-control study).
-2. Disease Name: Specify the target disease studied in the text.
-3. Data Sources: Extract details about the primary data source, such as the name of the dataset, or the specific institution or public database from which the data were obtained.
-4. External Validation: Determine whether the study includes an external validation set, which refers to a dataset originating from a different source than the model development set. All subsequent references to the validation set refer specifically to external validation, not internal test sets.
-5. Date Range: Specify the dates of the collected participant data for model development and model external validation, including the start and end dates.
-6. Follow-up Time: Specify the follow-up time of the cohort for the model development stage, if applicable.
-7. Sample Characteristics: Indicate whether the included samples had a specific disease history, underwent particular surgeries or treatments, or were in a certain condition (e.g., pregnancy, smoking).
-8. Sample Sizes: Extract the sample sizes for the development set (including training set and test set) and external validation set, if mentioned.
-9. Case and Control Numbers: What are the numbers of cases and controls in the development set? What are the numbers of cases and controls in the external validation set? Perform inference and calculation as much as possible based on the provided sample data.
-10. Participant Statistics: Extract demographic information about participants in the development and external validation stages, including: the number of female participants; the number of male participants. Perform inference and calculation as much as possible based on the provided sample data.
-11. Extract age information about participants in the development and external validation stages, including the age range of participants; the average age and standard deviation of participants; the median age and interquartile range of participants.
-12. The racial or ethnic composition of participants in the development and external validation stages.
+
+Stage 1: Comprehension and evidence extraction for study and sample information.
+Read the article and extract evidence for the following fields:
+Study Type; Disease Name; External Validation; Date Range in the Development Set; Date Range in the Validation Set; Median Follow-up Time (Years) and IQR; Mean Follow-up Time (Years) and Standard Error; Data Sources; Sample Characteristics; Number of Cases in the Development Set; Number of Controls in the Development Set; Number of Cases in the Validation Set; Number of Controls in the Validation Set; Number of Female Participants (Development); Number of Female Participants (Validation); Number of Male Participants (Development); Number of Male Participants (Validation); Age Range (Development); Age Range (Validation); Average Age and Standard Deviation (Development); Average Age and Standard Deviation (Validation); Median Age (Development) and IQR; Median Age (Validation) and IQR; Racial/Ethnic Composition (Development); Racial/Ethnic Composition (Validation).
+
+Return concise field-level notes with supporting evidence phrases or source sections where possible. Do not output JSON in this stage.
     """
     prompt2 = """
-Continue extracting the following details related to the prediction models from the research. If the paper constructs or evaluates multiple models, please extract the following information for all models.
-1. Model Type: Identify the type of prediction models used (e.g., logistic regression, random forests, deep learning).
-2. Prediction Variables: List the variables used in every prediction model.
-3. Report the AUC values, including confidence intervals, for the development stage and the validation stage.
-4. Report the C-index values, including confidence intervals, for the development stage and the validation stage.
-5. Report accuracy values, including confidence intervals, for the development stage and the validation stage.
-6. Report F1 scores, including confidence intervals, for the development stage and the validation stage.
-7. Determine whether calibration values are reported for the development stage and the validation stage, such as calibration curve, Hosmer–Lemeshow test, Brier Score, or expected vs. observed outcomes. If available, please report them.
-8. Nomogram Development: Indicate whether a nomogram was constructed based on the model.
-9. Use of TRIPOD Guidelines: State whether the study followed the TRIPOD guidelines, if applicable.
+You are continuing the same clinical prediction model extraction task.
+
+[Extracted text]
+
+Stage 2: Comprehension and evidence extraction for prediction-model information.
+Identify every distinct prediction model and every distinct model stage reported in the article. A model-stage record should correspond to either Development/internal validation or External validation.
+
+For each model-stage record, extract evidence for:
+Model Numbers; Model Stage; Model Name; Model Type; Prediction Variables; AUC Values; C-index Values; Accuracy; F1-score; Calibration Values; Nomogram Application; Use of TRIPOD Guidelines.
+
+Rules:
+1. Do not merge development/internal validation metrics with external validation metrics.
+2. Do not prioritize validation metrics over development metrics; instead create separate model-stage records when both are reported.
+3. If the article reports multiple models, include all primary, secondary, comparative, and machine-learning models that have extractable model information.
+4. Model Stage must be exactly one of: Development/internal validation; External validation.
+5. Model Type must describe the modeling method only, such as Logistic regression, Cox proportional hazards model, Random forest, Support vector machine, Neural network, Nomogram, Polygenic risk score. Do not write validation status as model type.
+
+Return concise model-level notes with supporting evidence phrases or source sections where possible. Do not output JSON in this stage.
     """
     prompt3 = """
-Please format the extracted information into two columns: one column for the field and one column for the value, ensuring that each field corresponds to only one value. Use the following fields to create the table. This table consists of 25 fields.
-1. Study Type: e.g., prospective study, retrospective study. If it is not mentioned in the text, answer NA.
-2. Disease Name: e.g. lung cancer.
-3. External Validation: Answer Yes or No.
-4. Date Range in the Development Set: e.g., 1992–2008. If it is not mentioned in the text, answer NA.
-5. Date Range in the Validation Set: e.g., 1992–2008. If this study lacks external validation, answer N/A.
-6. Median Follow-up Time (Years) and IQR: e.g., 2.95 years (IQR: 1.71–4.83). If it is not mentioned in the text, answer NA.
-7. Mean Follow-up Time (Years) and Standard Error: e.g., 2.95 years (SD: 0.71). If it is not mentioned in the text, answer NA.
-8. Data Sources: e.g., the Kaiser Permanente Washington Breast Cancer Surveillance Consortium (BCSC) registry, the GEO database, the Cancer Screening Program in Urban China (CanSPUC) conducted in Henan Province. If it is not mentioned in the text, answer NA.
-9. Sample Characteristics: e.g., patients with a history of diabetes, pregnant women, ever-smokers. If it is not mentioned in the text, answer N/A.
-10. Number of Cases in the Development Set: e.g., 5,323. If it is not mentioned in the text, answer NA.
-11. Number of Controls in the Development Set: e.g., 5,323. If it is not mentioned in the text, answer NA.
-12. Number of Cases in the External Validation Set: e.g., 5,323. If this study lacks external validation, answer N/A.
-13. Number of Controls in the External Validation Set: e.g., 5,323. If this study lacks external validation, answer N/A.
-14. Number of Female Participants (Development): e.g., 86. If it is not mentioned in the text, answer NA.
-15. Number of Female Participants (External Validation): e.g., 86. If this study lacks external validation, answer N/A.
-16. Number of Male Participants (Development): e.g., 545. If it is not mentioned in the text, answer NA.
-17. Number of Male Participants (External Validation): e.g., 545. If this study lacks external validation, answer N/A.
-18. Age Range (Development): e.g., 22–60. If it is not mentioned in the text, answer NA.
-19. Age Range (External Validation): e.g., 22–60. If this study lacks external validation, answer N/A.
-20. Average Age and Standard Deviation (Development): e.g., 74.2 years (SD = 8.2). If it is not mentioned in the text, answer NA.
-21. Average Age and Standard Deviation (External Validation): e.g., 74.2 years (SD = 8.2). If this study lacks external validation, answer N/A.
-22. Median Age (Development) and IQR: e.g., 43.2 years (IQR: 32.43–64.83). If it is not mentioned in the text, answer NA.
-23. Median Age (External Validation) and IQR: e.g., 43.2 years (IQR: 32.43–64.83). If this study lacks external validation, answer N/A.
-24. Racial/Ethnic Composition (Development): e.g., White: 80.4%, Asian: 8.8%, Black: 3.9%, Other or multiple races: 5.3%, Unknown: 1.5%. If it is not mentioned in the text, answer NA.
-25. Racial/Ethnic Composition (External Validation): e.g., White: 80.4%, Asian: 8.8%, Black: 3.9%, Other or multiple races: 5.3%, Unknown: 1.5%. If this study lacks external validation, answer N/A.
+Stage 3: Convert the study and sample information into schema-constrained JSON.
+
+Use only the article text and the prior extraction notes below. Do not add new facts.
+
+[Prior responses]
+
+Return exactly one JSON object and no extra text. Use this exact schema and these exact keys:
+{
+  "Study Type": "string",
+  "Disease Name": "string",
+  "External Validation": "Yes or No",
+  "Date Range in the Development Set": "string",
+  "Date Range in the Validation Set": "string",
+  "Median Follow-up Time (Years) and IQR": "string",
+  "Mean Follow-up Time (Years) and Standard Error": "string",
+  "Data Sources": "string",
+  "Sample Characteristics": "string",
+  "Number of Cases in the Development Set": "string",
+  "Number of Controls in the Development Set": "string",
+  "Number of Cases in the Validation Set": "string",
+  "Number of Controls in the Validation Set": "string",
+  "Number of Female Participants (Development)": "string",
+  "Number of Female Participants (Validation)": "string",
+  "Number of Male Participants (Development)": "string",
+  "Number of Male Participants (Validation)": "string",
+  "Age Range (Development)": "string",
+  "Age Range (Validation)": "string",
+  "Average Age and Standard Deviation (Development)": "string",
+  "Average Age and Standard Deviation (Validation)": "string",
+  "Median Age (Development) and IQR": "string",
+  "Median Age (Validation) and IQR": "string",
+  "Racial/Ethnic Composition (Development)": "string",
+  "Racial/Ethnic Composition (Validation)": "string"
+}
+
+Use "N/A" for unreported or uncertain fields.
     """
     prompt4 = """
-Please extract and format the following information for the models in the study. Organize the data into a two-column or multi-column table, with one column for the field name (e.g., Model Name, Model Type, etc.) and the remaining columns for values. Each column corresponds to one model's values. If there are multiple models, a multi-column table is needed. Each field should occupy only one row in the table. This table consists of 10 fields.
-1. Model Name: e.g., Tyrer-Cuzick Model, LiFeCRC Score.
-2. Model Type: e.g., logistic regression, random forest, support vector machine.
-3. Prediction Variables: e.g., age, gender, education, smoking status, blood pressure medication, prevalent stroke.
-4. AUC Values: e.g., 0.767 (95% CI: 0.749–0.786). If a validation stage is present, prioritize reporting the values from the validation stage.
-5. C-index Values: e.g., 0.767 (95% CI: 0.749–0.786). If a validation stage is present, prioritize reporting the values from the validation stage.
-6. Accuracy: e.g., 74.8% (95% CI: 71.30% - 78.30%). If a validation stage is present, prioritize reporting the values from the validation stage.
-7. F1-score: e.g., 74.8% (95% CI: 71.30% - 78.30%). If a validation stage is present, prioritize reporting the values from the validation stage.
-8. Calibration Values: e.g., Hosmer-Lemeshow (HL) test p-value = 0.428; O/E ratio ranged from 0.79 to 1.22, or a brief description. If a validation stage is present, prioritize reporting the values from the validation stage.
-9. Nomogram Application: Answer Yes or No.
-10. Use of TRIPOD Guidelines: Answer Yes or No.
+Stage 4: Convert the prediction-model information into a schema-constrained JSON array.
+
+Use only the article text and the prior extraction notes below. Do not add new facts.
+
+[Prior responses]
+
+Return exactly one JSON array and no extra text. Each array element must use this exact schema and these exact keys:
+{
+  "Model Numbers": "string",
+  "Model Stage": "Development/internal validation or External validation",
+  "Model Name": "string",
+  "Model Type": "string",
+  "Prediction Variables": "string",
+  "AUC Values": "string",
+  "C-index Values": "string",
+  "Accuracy": "string",
+  "F1-score": "string",
+  "Calibration Values": "string",
+  "Nomogram Application": "Yes or No",
+  "Use of TRIPOD Guidelines": "Yes or No"
+}
+
+Rules:
+1. Model Stage must be exactly "Development/internal validation" or "External validation".
+2. Create separate records when the same model has separate development/internal-validation and external-validation results.
+3. Do not use validation status as Model Type.
+4. Use "N/A" for unreported or uncertain fields.
     """
     return [prompt1, prompt2, prompt3, prompt4]
 
@@ -686,6 +721,7 @@ Please extract and format the following information for the models in the study.
 # 6. Structured Data Storage
 # =====================================
 import csv
+import json
 
 # Define fields
 sample_fields = [
@@ -719,6 +755,8 @@ sample_fields = [
 
 model_fields = [
     "PMID",  # Add PMID field to match extraction function
+    "Model Numbers",
+    "Model Stage",
     "Model Name",
     "Model Type",
     "Prediction Variables",
@@ -743,6 +781,114 @@ literature_fields = [
     "Full Text"
 ]
 
+MODEL_STAGE_ALLOWED_VALUES = {"Development/internal validation", "External validation"}
+
+def normalize_missing_value(value):
+    """Normalize missing values to N/A while preserving reported strings."""
+    if value is None:
+        return "N/A"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    value = str(value).strip()
+    if not value or value.upper() in {"NA", "NAN", "NONE", "NULL"}:
+        return "N/A"
+    return value
+
+def extract_json_payload(response_text):
+    """
+    Parse a JSON object/array from an LLM response.
+
+    The primary path is strict json.loads(). A limited rescue path extracts the
+    first fenced JSON block or the outermost JSON object/array when the model
+    accidentally wraps the payload in prose.
+    """
+    if not response_text:
+        raise ValueError("Empty LLM response")
+
+    text = response_text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    if fenced:
+        return json.loads(fenced.group(1).strip())
+
+    starts = [idx for idx in [text.find("{"), text.find("[")] if idx != -1]
+    if not starts:
+        raise ValueError("No JSON object or array found in response")
+    start = min(starts)
+    end_obj = text.rfind("}")
+    end_arr = text.rfind("]")
+    end = max(end_obj, end_arr)
+    if end <= start:
+        raise ValueError("Malformed JSON payload")
+    return json.loads(text[start:end + 1])
+
+def validate_study_sample_json(payload, pmid):
+    """Validate and normalize the Study & Sample Information JSON object."""
+    if not isinstance(payload, dict):
+        raise ValueError("Study/sample JSON must be an object")
+
+    record = {field: "N/A" for field in sample_fields}
+    record["PMID"] = pmid
+    for field in sample_fields:
+        if field == "PMID":
+            continue
+        record[field] = normalize_missing_value(payload.get(field, "N/A"))
+
+    if record["External Validation"] not in {"Yes", "No", "N/A"}:
+        value = record["External Validation"].lower()
+        if value in {"yes", "y", "true"}:
+            record["External Validation"] = "Yes"
+        elif value in {"no", "n", "false"}:
+            record["External Validation"] = "No"
+        else:
+            record["External Validation"] = "N/A"
+    return record
+
+def validate_model_json(payload, pmid):
+    """Validate and normalize the Model Information JSON array."""
+    if isinstance(payload, dict):
+        if "model_information" in payload:
+            payload = payload["model_information"]
+        elif "models" in payload:
+            payload = payload["models"]
+        else:
+            payload = [payload]
+    if not isinstance(payload, list):
+        raise ValueError("Model JSON must be an array")
+
+    records = []
+    for idx, item in enumerate(payload, 1):
+        if not isinstance(item, dict):
+            continue
+        record = {field: "N/A" for field in model_fields}
+        record["PMID"] = pmid
+        for field in model_fields:
+            if field == "PMID":
+                continue
+            record[field] = normalize_missing_value(item.get(field, "N/A"))
+
+        if record["Model Numbers"] == "N/A":
+            record["Model Numbers"] = str(idx)
+        if record["Model Stage"] not in MODEL_STAGE_ALLOWED_VALUES:
+            stage = record["Model Stage"].lower()
+            if "external" in stage:
+                record["Model Stage"] = "External validation"
+            else:
+                record["Model Stage"] = "Development/internal validation"
+        records.append(record)
+
+    if not records:
+        empty_record = {field: "N/A" for field in model_fields}
+        empty_record["PMID"] = pmid
+        empty_record["Model Numbers"] = "1"
+        empty_record["Model Stage"] = "Development/internal validation"
+        records.append(empty_record)
+    return records
+
 def process_input(input_text, prompts, max_input_tokens: Optional[int] = None):
     """Process input text and get LLM responses using prompts"""
     responses = []
@@ -759,12 +905,18 @@ def process_input(input_text, prompts, max_input_tokens: Optional[int] = None):
 
     for i, prompt in enumerate(prompts, 1):
         console.print(f"[italic yellow]Processing Prompt {i}...[/]")
+        prior_context = "\n\n".join(
+            f"Stage {stage_idx} response:\n{response}"
+            for stage_idx, response in enumerate(responses, 1)
+        )
 
         if "[Extracted text]" in prompt and len(text_chunks) > 1:
             chunk_responses = []
             for chunk_idx, chunk_text in enumerate(text_chunks, 1):
                 console.print(f"[dim]  Prompt {i}: chunk {chunk_idx}/{len(text_chunks)}[/]")
-                messages = [{"role": "user", "content": prompt.replace("[Extracted text]", chunk_text)}]
+                prompt_text = prompt.replace("[Extracted text]", chunk_text)
+                prompt_text = prompt_text.replace("[Prior responses]", prior_context)
+                messages = [{"role": "user", "content": prompt_text}]
                 chunk_response = chat_completion(messages)
                 if chunk_response:
                     chunk_responses.append(f"[Chunk {chunk_idx}/{len(text_chunks)}]\n{chunk_response}")
@@ -778,7 +930,9 @@ def process_input(input_text, prompts, max_input_tokens: Optional[int] = None):
             else:
                 console.print(f"[bold red]Prompt {i} processing failed[/]")
         else:
-            messages = [{"role": "user", "content": prompt.replace("[Extracted text]", input_text)}]
+            prompt_text = prompt.replace("[Extracted text]", input_text)
+            prompt_text = prompt_text.replace("[Prior responses]", prior_context)
+            messages = [{"role": "user", "content": prompt_text}]
             response = chat_completion(messages)
             if response:
                 responses.append(response)
@@ -790,54 +944,14 @@ def process_input(input_text, prompts, max_input_tokens: Optional[int] = None):
     return responses
 
 def extract_sample_data(response_sample, pmid):
-    """Extract sample data from response"""
-    data_dict = {field: "" for field in sample_fields}
-    data_dict["PMID"] = pmid
-    lines_sample = response_sample.splitlines()
-    
-    for line in lines_sample:
-        match = re.match(r'\s*\d+\.\s+([^0-9].*?)\s{2,}(.*)', line.strip())
-        if match:
-            field, value = match.groups()
-            for sample_field in sample_fields:
-                if sample_field in field:
-                    data_dict[sample_field] = value
-                    break
-
-    return data_dict
+    """Extract study/sample data from schema-constrained JSON."""
+    payload = extract_json_payload(response_sample)
+    return validate_study_sample_json(payload, pmid)
 
 def extract_model_data(response_model, pmid):
-    """Extract model data from response, handling multiple models"""
-    model_data_list = []
-    lines_model = response_model.splitlines()
-    
-    current_model = {field: "" for field in model_fields}
-    current_model["PMID"] = pmid
-    
-    for line in lines_model:
-        match = re.match(r'\s*\d+\.\s+([^0-9].*?)\s{2,}(.*)', line.strip())
-        if match:
-            field, value = match.groups()
-            if "Model Name" in field and current_model["Model Name"]:
-                # Detected new model, save current model and start new one
-                model_data_list.append(current_model)
-                current_model = {field: "" for field in model_fields}
-                current_model["PMID"] = pmid
-            for model_field in model_fields:
-                if model_field in field:
-                    current_model[model_field] = value
-                    break
-    
-    # Append the last model
-    if current_model["Model Name"] or any(current_model[field] for field in model_fields if field != "PMID"):
-        model_data_list.append(current_model)
-    
-    # If no models were identified, return an empty model record
-    if not model_data_list:
-        model_data_list.append({field: "" for field in model_fields})
-        model_data_list[0]["PMID"] = pmid
-    
-    return model_data_list
+    """Extract model-stage data from schema-constrained JSON."""
+    payload = extract_json_payload(response_model)
+    return validate_model_json(payload, pmid)
 
 # =====================================
 # 7. Main Program
