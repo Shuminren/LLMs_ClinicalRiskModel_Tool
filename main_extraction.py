@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Main program for clinical risk prediction model information extraction
-Fetches article information from PubMed and PMC, and uses LLM to extract structured data
+Fetches article metadata from PubMed, then obtains full text either by online
+PMC retrieval or by local PMID-indexed TXT/PDF import.
 """
 
 # =====================================
@@ -18,6 +19,7 @@ API_MAX_INPUT_TOKENS = 180000
 from rich.console import Console
 import time
 import math
+from pathlib import Path
 
 console = Console()
 
@@ -66,6 +68,20 @@ def read_pmid_from_txt(file_path):
     except Exception as e:
         console.print(f"[bold red]Error reading {file_path}: {str(e)}[/]")
         return []
+
+
+def choose_full_text_source():
+    """Ask the user to choose the full-text source mode."""
+    console.print("\n[bold cyan]Choose full-text source:[/]")
+    console.print("1. Online PMC retrieval")
+    console.print("2. Local PMID-named TXT/PDF files")
+    while True:
+        choice = input("Enter 1 or 2: ").strip()
+        if choice == "1":
+            return "pmc"
+        if choice == "2":
+            return "local"
+        console.print("[yellow]Invalid choice. Please enter 1 or 2.[/]")
 
 # =====================================
 # 3. PubMed Metadata Scraping Module
@@ -277,30 +293,42 @@ def clean_text_v2(text: str) -> str:
 def chunk_text_v2(
     text: str,
     max_input_tokens: Optional[int] = None,
-    chunk_size_words: int = 4000,
-    overlap_words: int = 1000,
-    token_per_word: float = 1.3
+    chunk_size_tokens: int = 4000,
+    overlap_tokens: int = 1000,
+    token_per_word: float = 1.3,
+    overlap_words: Optional[int] = None
 ) -> List[str]:
-    """Chunk text by max input tokens (falls back to fixed word chunks)."""
+    """Chunk text with an approximate token-based overlap.
+
+    The fallback ``overlap_words`` parameter is retained for compatibility with
+    older calls, but new calls should use ``overlap_tokens``.
+    """
     words = text.split()
     if not words:
         return []
+
+    chunk_size_words = max(1, int(chunk_size_tokens / token_per_word))
+    overlap_word_count = (
+        max(0, overlap_words)
+        if overlap_words is not None
+        else max(0, int(overlap_tokens / token_per_word))
+    )
 
     if max_input_tokens and max_input_tokens > 0:
         estimated_total_tokens = math.ceil(len(words) * token_per_word)
         if estimated_total_tokens <= max_input_tokens:
             return [text]
         chunk_size_words = max(1, int(max_input_tokens / token_per_word))
-        # Ensure we can advance; keep 1000-word overlap when text exceeds token limit.
-        if chunk_size_words <= overlap_words:
-            overlap_words = max(0, chunk_size_words - 1)
+        # Ensure we can advance while retaining approximately 1000 tokens of overlap.
+        if chunk_size_words <= overlap_word_count:
+            overlap_word_count = max(0, chunk_size_words - 1)
 
     if len(words) <= chunk_size_words:
         return [text]
     
     chunks = []
     start = 0
-    step = max(1, chunk_size_words - overlap_words)
+    step = max(1, chunk_size_words - overlap_word_count)
     while start < len(words):
         end = min(start + chunk_size_words, len(words))
         chunk = ' '.join(words[start:end])
@@ -605,6 +633,61 @@ def fetch_pmc_full_text_v2(pmcid: str, driver=None) -> Dict:
         'word_count': result.word_count
     }
 
+
+LOCAL_FULL_TEXT_DIRS = [
+    Path("."),
+    Path("FullTexts"),
+]
+LOCAL_FULL_TEXT_EXTENSIONS = [".txt", ".TXT", ".pdf", ".PDF"]
+
+
+def extract_pdf_text(path: Path) -> str:
+    """Extract text from a PDF using pypdf/PyPDF2 when available."""
+    try:
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            from PyPDF2 import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("PDF import requires pypdf or PyPDF2.") from exc
+
+    reader = PdfReader(str(path))
+    pages = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return "\n".join(pages)
+
+
+def load_local_full_text(pmid: str, search_dirs: Optional[List[Path]] = None) -> Optional[str]:
+    """Load a locally available PMID-indexed TXT/PDF full-text file if present."""
+    search_dirs = search_dirs or LOCAL_FULL_TEXT_DIRS
+    candidate_names = []
+    for ext in LOCAL_FULL_TEXT_EXTENSIONS:
+        candidate_names.extend([f"{pmid}{ext}", f"PMID{pmid}{ext}", f"pmid_{pmid}{ext}"])
+
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for name in candidate_names:
+            path = directory / name
+            if path.exists() and path.is_file():
+                if path.suffix.lower() == ".pdf":
+                    try:
+                        text = extract_pdf_text(path)
+                    except Exception as exc:
+                        console.print(f"[red]Failed to extract PDF text from {path}: {exc}[/]")
+                        continue
+                else:
+                    try:
+                        text = path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        text = path.read_text(encoding="utf-8", errors="ignore")
+                clean = clean_text_v2(text)
+                if clean:
+                    console.print(f"[green]Loaded local full text for PMID {pmid}: {path}[/]")
+                    return clean
+    return None
+
 # =====================================
 # 5. Prompt Definitions
 # =====================================
@@ -895,13 +978,13 @@ def process_input(input_text, prompts, max_input_tokens: Optional[int] = None):
     text_chunks = chunk_text_v2(
         input_text,
         max_input_tokens=max_input_tokens,
-        overlap_words=1000
+        overlap_tokens=1000
     )
     if not text_chunks:
         text_chunks = [input_text]
 
     if len(text_chunks) > 1:
-        console.print(f"[yellow]Input text exceeds token limit estimate, split into {len(text_chunks)} chunks (1000-word overlap).[/]")
+        console.print(f"[yellow]Input text exceeds token limit estimate, split into {len(text_chunks)} chunks (approximately 1000-token overlap).[/]")
 
     for i, prompt in enumerate(prompts, 1):
         console.print(f"[italic yellow]Processing Prompt {i}...[/]")
@@ -964,6 +1047,7 @@ def main():
     if not pmids:
         console.print("[bold red]Failed to read PMID[/]")
         return
+    full_text_source = choose_full_text_source()
 
     with open('literature_data.csv', 'a', newline='', encoding='utf-8') as literature_csv, \
          open('sample_data.csv', 'a', newline='', encoding='utf-8') as sample_csv, \
@@ -991,13 +1075,14 @@ def main():
                 driver = setup_driver()
                 pubmed_data = fetch_pubmed_data(pmid, driver)
                 
-                # Use optimized v2.1 version to fetch PMC full text
-                if pubmed_data.get('pmcid'):
+                if full_text_source == "pmc" and pubmed_data.get('pmcid'):
                     full_text_data = fetch_pmc_full_text_v2(pubmed_data['pmcid'], driver)
                     full_text = full_text_data.get('full_text', "")
-                else:
-                    console.print(f"[yellow]No PMCID found for PMID {pmid}, skipping full text extraction.[/]")
+                elif full_text_source == "pmc":
+                    console.print(f"[yellow]No PMCID found for PMID {pmid}; online PMC retrieval unavailable.[/]")
                     full_text = ""
+                else:
+                    full_text = load_local_full_text(pmid) or ""
                 
                 # Write literature data
                 literature_writer.writerow({

@@ -14,6 +14,82 @@ import openai
 from openai import OpenAIError
 import traceback
 import re
+from pathlib import Path
+
+
+LOCAL_FULL_TEXT_DIRS = [
+    Path("."),
+    Path("FullTexts"),
+]
+LOCAL_FULL_TEXT_EXTENSIONS = [".txt", ".TXT", ".pdf", ".PDF"]
+
+
+def clean_local_text(text):
+    """Normalize locally imported full text."""
+    text = re.sub(r'\s+', ' ', text or '')
+    return text.strip()
+
+
+def extract_pdf_text(path):
+    """Extract text from a PDF using pypdf/PyPDF2 when available."""
+    try:
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            from PyPDF2 import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("PDF import requires pypdf or PyPDF2.") from exc
+
+    reader = PdfReader(str(path))
+    pages = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return "\n".join(pages)
+
+
+def load_local_full_text(pmid, search_dirs=None):
+    """Load a locally available PMID-indexed TXT/PDF full-text file if present."""
+    search_dirs = search_dirs or LOCAL_FULL_TEXT_DIRS
+    candidate_names = []
+    for ext in LOCAL_FULL_TEXT_EXTENSIONS:
+        candidate_names.extend([f"{pmid}{ext}", f"PMID{pmid}{ext}", f"pmid_{pmid}{ext}"])
+
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for name in candidate_names:
+            path = directory / name
+            if path.exists() and path.is_file():
+                if path.suffix.lower() == ".pdf":
+                    try:
+                        text = extract_pdf_text(path)
+                    except Exception as exc:
+                        print(f"Failed to extract PDF text from {path}: {exc}")
+                        continue
+                else:
+                    try:
+                        text = path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        text = path.read_text(encoding="utf-8", errors="ignore")
+                text = clean_local_text(text)
+                if text:
+                    print(f"Loaded local full text for PMID {pmid}: {path}")
+                    return text
+    return None
+
+
+def choose_full_text_source():
+    """Ask the user to choose the full-text source mode."""
+    print("\nChoose full-text source:")
+    print("1. Online PMC retrieval")
+    print("2. Local PMID-named TXT/PDF files")
+    while True:
+        choice = input("Enter 1 or 2: ").strip()
+        if choice == "1":
+            return "pmc"
+        if choice == "2":
+            return "local"
+        print("Invalid choice. Please enter 1 or 2.")
 
 def get_pmcid_from_pmid(pmid):
     """
@@ -126,7 +202,7 @@ def extract_pmc_content(pmcid):
     except Exception as e:
         return f"Error fetching content for PMCID {pmcid}: {str(e)}"
 
-def disagreement_resolution(openai_key, claude_key, agreement_filepath):
+def disagreement_resolution(openai_key, claude_key, agreement_filepath, full_text_source="pmc"):
     """
     Resolve disagreements between two LLM models using cross-validation with both GPT-5.2 and Claude
     
@@ -175,10 +251,25 @@ def disagreement_resolution(openai_key, claude_key, agreement_filepath):
         
         # Get PMCID and full text (if not yet retrieved)
         if pmid not in processed_pmids:
-            pmcid = get_pmcid_from_pmid(pmid)
-            if pmcid is None:
-                print(f"PMCID not found for PMID {pmid}, skipping all variables for this PMID.")
-                # Create error records for all variables
+            pmcid = get_pmcid_from_pmid(pmid) if full_text_source == "pmc" else None
+            if full_text_source == "local":
+                content = load_local_full_text(pmid)
+                if not content:
+                    print(f"No local full text found for PMID {pmid}, skipping all variables for this PMID.")
+                    # Create error records for all variables
+                    for idx, row in group_df.iterrows():
+                        results.append({
+                            "PMID": pmid,
+                            "PMCID": "",
+                            "Variable": str(row["Variable"]) if pd.notna(row["Variable"]) else "",
+                            "GPT5_2_Response": str(row["GPT5_2_Responses"]) if pd.notna(row["GPT5_2_Responses"]) else "",
+                            "CLAUDE_Response": str(row["CLAUDE_Responses"]) if pd.notna(row["CLAUDE_Responses"]) else "",
+                            "GPT5_2_Verification_of_Claude": "Error: full text not found",
+                            "Claude_Verification_of_GPT5_2": "Error: full text not found"
+                        })
+                    continue
+            elif pmcid is None:
+                print(f"PMCID not found for PMID {pmid}; online PMC retrieval unavailable.")
                 for idx, row in group_df.iterrows():
                     results.append({
                         "PMID": pmid,
@@ -190,9 +281,9 @@ def disagreement_resolution(openai_key, claude_key, agreement_filepath):
                         "Claude_Verification_of_GPT5_2": "Error: PMCID not found"
                     })
                 continue
-            
-            print(f"Fetching full text for PMCID: {pmcid}")
-            content = extract_pmc_content(pmcid)
+            else:
+                print(f"Fetching full text for PMCID: {pmcid}")
+                content = extract_pmc_content(pmcid)
             print(f"Extracted Content Length: {len(content)} characters")
             processed_pmids[pmid] = {"pmcid": pmcid, "content": content}
         else:
@@ -350,7 +441,8 @@ def main():
         openai_key = input("Enter the OpenAI API Key for GPT-5.2: ")
         claude_key = input("Enter the Claude API Key: ")
         agreement_filepath = input("Enter the Path to the Annotated Agreement Matching File: ")
-        disagreement_resolution(openai_key, claude_key, agreement_filepath)
+        full_text_source = choose_full_text_source()
+        disagreement_resolution(openai_key, claude_key, agreement_filepath, full_text_source)
     else:
         print("You Choose Not to Execute Agreement/Disagreement Module.")
 
